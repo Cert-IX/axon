@@ -666,6 +666,76 @@ class KuzuBackend:
 
         return graph
 
+    def delete_synthetic_nodes(self) -> None:
+        """Remove all COMMUNITY and PROCESS nodes and their relationships."""
+        assert self._conn is not None
+        for table in ("Community", "Process"):
+            try:
+                self._conn.execute(f"MATCH (n:{table}) DETACH DELETE n")
+            except Exception:
+                logger.debug(
+                    "delete_synthetic_nodes: failed for %s", table, exc_info=True
+                )
+
+    def upsert_embeddings(self, embeddings: list[NodeEmbedding]) -> None:
+        """Insert or update embeddings without wiping existing ones."""
+        assert self._conn is not None
+        for emb in embeddings:
+            try:
+                self._conn.execute(
+                    "MERGE (e:Embedding {node_id: $nid}) SET e.vec = $vec",
+                    parameters={"nid": emb.node_id, "vec": emb.embedding},
+                )
+            except Exception:
+                logger.debug(
+                    "upsert_embeddings failed for %s", emb.node_id, exc_info=True
+                )
+
+    def update_dead_flags(
+        self, dead_ids: set[str], alive_ids: set[str]
+    ) -> None:
+        """Set is_dead=True on *dead_ids* and is_dead=False on *alive_ids*."""
+        assert self._conn is not None
+        for node_id in dead_ids:
+            table = _table_for_id(node_id)
+            if table:
+                try:
+                    self._conn.execute(
+                        f"MATCH (n:{table}) WHERE n.id = $nid SET n.is_dead = true",
+                        parameters={"nid": node_id},
+                    )
+                except Exception:
+                    logger.debug(
+                        "update_dead_flags failed for %s", node_id, exc_info=True
+                    )
+        for node_id in alive_ids:
+            table = _table_for_id(node_id)
+            if table:
+                try:
+                    self._conn.execute(
+                        f"MATCH (n:{table}) WHERE n.id = $nid SET n.is_dead = false",
+                        parameters={"nid": node_id},
+                    )
+                except Exception:
+                    logger.debug(
+                        "update_dead_flags failed for %s", node_id, exc_info=True
+                    )
+
+    def remove_relationships_by_type(self, rel_type: RelType) -> None:
+        """Delete all relationships of a specific type."""
+        assert self._conn is not None
+        try:
+            self._conn.execute(
+                "MATCH ()-[r:CodeRelation]->() WHERE r.rel_type = $rt DELETE r",
+                parameters={"rt": rel_type.value},
+            )
+        except Exception:
+            logger.debug(
+                "remove_relationships_by_type failed for %s",
+                rel_type.value,
+                exc_info=True,
+            )
+
     def bulk_load(self, graph: KnowledgeGraph) -> None:
         """Replace the entire store with the contents of *graph*.
 
