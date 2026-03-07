@@ -34,7 +34,7 @@ const LAYOUT_OPTIONS: { label: string; value: 'force' | 'tree' | 'radial' | 'com
   { label: 'Force', value: 'force' },
   { label: 'Tree', value: 'tree' },
   { label: 'Radial', value: 'radial' },
-  { label: 'Community', value: 'community' },
+  // { label: 'Community', value: 'community' },
   { label: 'Circular', value: 'circular' },
 ];
 
