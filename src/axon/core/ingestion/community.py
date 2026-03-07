@@ -26,7 +26,6 @@ _CALLABLE_LABELS: tuple[NodeLabel, ...] = (
     NodeLabel.CLASS,
 )
 
-# Heritage edge types to include in the community graph with reduced weight.
 _HERITAGE_EDGE_TYPES: tuple[RelType, ...] = (
     RelType.EXTENDS,
     RelType.IMPLEMENTS,

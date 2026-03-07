@@ -177,6 +177,14 @@ class StorageBackend(Protocol):
         """Delete all relationships of a specific type."""
         ...
 
+    def get_file_index(self) -> dict[str, str]:
+        """Return ``{file_path: node_id}`` for all File nodes."""
+        ...
+
+    def get_symbol_name_index(self) -> dict[str, list[str]]:
+        """Return ``{symbol_name: [node_id, ...]}`` for callable/type symbols."""
+        ...
+
     def rebuild_fts_indexes(self) -> None:
         """Drop and recreate all FTS indexes after bulk data changes."""
         ...

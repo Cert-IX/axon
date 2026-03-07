@@ -54,6 +54,7 @@ class TestHelp:
             "watch",
             "diff",
             "mcp",
+            "host",
         ]
         for cmd in expected_commands:
             assert cmd in result.output, f"Command '{cmd}' not found in --help output"
@@ -262,6 +263,7 @@ class TestSetup:
         assert "Claude Code" in result.output
         assert "Cursor" in result.output
         assert '"axon"' in result.output
+        assert '"type": "http"' in result.output
 
     def test_setup_claude_only(self) -> None:
         result = runner.invoke(app, ["setup", "--claude"])
@@ -309,6 +311,54 @@ class TestServe:
         with patch.object(real_asyncio, "run") as mock_run:
             result = runner.invoke(app, ["serve"])
         assert result.exit_code == 0
+        mock_run.assert_called_once()
+
+    def test_serve_with_watch_proxies_to_host(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        import asyncio as real_asyncio
+
+        monkeypatch.chdir(tmp_path)
+        with patch(
+            "axon.cli.main._ensure_host_running",
+            return_value={"host_url": "http://127.0.0.1:8420", "mcp_url": "http://127.0.0.1:8420/mcp"},
+        ) as mock_ensure:
+            with patch.object(real_asyncio, "run") as mock_run:
+                result = runner.invoke(app, ["serve", "--watch"])
+        assert result.exit_code == 0
+        mock_ensure.assert_called_once()
+        mock_run.assert_called_once()
+
+
+class TestHost:
+    def test_host_command_exists(self) -> None:
+        result = runner.invoke(app, ["host", "--help"])
+        assert result.exit_code == 0
+        assert "HTTP MCP" in result.output or "shared" in result.output.lower()
+
+
+class TestUi:
+    def test_ui_attaches_to_running_host(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        monkeypatch.chdir(tmp_path)
+        with patch(
+            "axon.cli.main._get_live_host_info",
+            return_value={"host_url": "http://127.0.0.1:8420", "mcp_url": "http://127.0.0.1:8420/mcp"},
+        ):
+            with patch("webbrowser.open") as mock_open:
+                result = runner.invoke(app, ["ui"])
+        assert result.exit_code == 0
+        assert "http://127.0.0.1:8420" in result.output
+        mock_open.assert_called_once_with("http://127.0.0.1:8420")
+
+    def test_ui_direct_skips_host_attach(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        monkeypatch.chdir(tmp_path)
+        axon_dir = tmp_path / ".axon" / "kuzu"
+        axon_dir.mkdir(parents=True)
+        with patch("axon.cli.main._get_live_host_info") as mock_host_info:
+            with patch("axon.web.app.create_app") as mock_create_app:
+                with patch("uvicorn.run") as mock_run:
+                    result = runner.invoke(app, ["ui", "--direct", "--no-open"])
+        assert result.exit_code == 0
+        mock_host_info.assert_not_called()
+        mock_create_app.assert_called_once()
         mock_run.assert_called_once()
 
 

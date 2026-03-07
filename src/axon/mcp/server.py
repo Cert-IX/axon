@@ -1,4 +1,4 @@
-"""MCP server for Axon — exposes code intelligence tools over stdio transport.
+"""MCP server for Axon — exposes code intelligence tools over stdio and HTTP.
 
 Registers fifteen tools and three resources that give AI agents and MCP clients
 access to the Axon knowledge graph.  The server lazily initialises a
@@ -24,7 +24,9 @@ from collections.abc import Callable
 from typing import Iterator
 
 from mcp.server import Server
+from mcp.server.fastmcp.server import StreamableHTTPASGIApp
 from mcp.server.stdio import stdio_server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import Resource, TextContent, Tool
 
 from axon.core.storage.kuzu_backend import KuzuBackend
@@ -493,6 +495,12 @@ async def main() -> None:
     """Run the Axon MCP server over stdio transport."""
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())
+
+
+def create_streamable_http_app() -> tuple[StreamableHTTPSessionManager, StreamableHTTPASGIApp]:
+    """Create a streamable HTTP transport for the existing MCP server."""
+    session_manager = StreamableHTTPSessionManager(app=server)
+    return session_manager, StreamableHTTPASGIApp(session_manager)
 
 if __name__ == "__main__":
     asyncio.run(main())

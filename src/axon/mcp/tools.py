@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from axon.core.cypher_guard import WRITE_KEYWORDS, sanitize_cypher
+from axon.core.embeddings.embedder import embed_query
 from axon.core.ingestion.community import export_to_igraph
 from axon.core.ingestion.dead_code import _is_test_file
 from axon.core.search.hybrid import hybrid_search
 from axon.core.storage.base import StorageBackend
 from axon.core.storage.kuzu_backend import escape_cypher as _escape_cypher
+from axon.mcp.resources import get_dead_code_list
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,6 @@ def handle_list_repos(registry_dir: Path | None = None) -> str:
                 continue
 
     if not repos and use_cwd_fallback:
-        # Fall back: scan current directory for .axon
         cwd_axon = Path.cwd() / ".axon" / "meta.json"
         if cwd_axon.exists():
             try:
@@ -106,20 +107,14 @@ def _group_by_process(
     results: list,
     storage: StorageBackend,
 ) -> dict[str, list]:
-    """Map search results to their parent execution processes.
-
-    Delegates to ``storage.get_process_memberships()`` for a safe
-    parameterized query, falling back to an empty dict if the backend
-    does not support the method.
-    """
+    """Map search results to their parent execution processes."""
     if not results:
         return {}
 
     node_ids = [r.node_id for r in results]
-
     try:
         node_to_process = storage.get_process_memberships(node_ids)
-    except (AttributeError, TypeError):
+    except AttributeError:
         return {}
 
     groups: dict[str, list] = {}
@@ -183,8 +178,6 @@ def handle_query(storage: StorageBackend, query: str, limit: int = 20) -> str:
         and snippet for each result.
     """
     limit = max(1, min(limit, 100))
-
-    from axon.core.embeddings.embedder import embed_query
 
     query_embedding = embed_query(query)
     if query_embedding is None:
@@ -259,7 +252,6 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
         for t in type_refs:
             lines.append(f"  -> {t.name}  {t.file_path}")
 
-    # Heritage (extends / implements)
     escaped_id = _escape_cypher(node.id)
     heritage_rows = storage.execute_raw(
         f"MATCH (n)-[r:CodeRelation]->(parent) "
@@ -275,7 +267,6 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
             rel = row[2] or "?"
             lines.append(f"  -> {rel}: {parent_name}  {parent_file}")
 
-    # Imported by (files that import this symbol's file)
     if node.file_path:
         escaped_fp = _escape_cypher(node.file_path)
         import_rows = storage.execute_raw(
@@ -333,7 +324,6 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
     if not affected_with_depth:
         return f"No upstream callers found for '{symbol}'."
 
-    # Group by depth
     by_depth: dict[int, list] = {}
     for node, d in affected_with_depth:
         by_depth.setdefault(d, []).append(node)
@@ -343,13 +333,9 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
     lines = [f"Impact analysis for: {start_node.name} ({label_display})"]
     lines.append(f"Depth: {depth} | Total: {total} symbols")
 
-    # Build confidence lookup for depth-1 (direct callers) display
-    conf_lookup: dict[str, float] = {}
-    try:
-        for node, conf in storage.get_callers_with_confidence(start_node.id):
-            conf_lookup[node.id] = conf
-    except (AttributeError, TypeError):
-        pass
+    conf_lookup = {
+        node.id: conf for node, conf in storage.get_callers_with_confidence(start_node.id)
+    }
 
     counter = 1
     for d in sorted(by_depth.keys()):
@@ -381,8 +367,6 @@ def handle_dead_code(storage: StorageBackend) -> str:
     Returns:
         Formatted list of dead code symbols grouped by file.
     """
-    from axon.mcp.resources import get_dead_code_list
-
     return get_dead_code_list(storage)
 
 _DIFF_FILE_PATTERN = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
@@ -438,39 +422,28 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
 
     for file_path, ranges in changed_files.items():
         affected_symbols = []
-        try:
-            # Reject paths with characters outside the safe set to prevent
-            # Cypher injection via the f-string interpolation below.
-            if not _SAFE_PATH.match(file_path):
-                logger.warning("Skipping unsafe file path in diff: %r", file_path)
-                lines.append(f"  {file_path}:")
-                lines.append("    (skipped: path contains unsafe characters)")
-                lines.append("")
-                continue
-
-            rows = storage.execute_raw(
-                f"MATCH (n) WHERE n.file_path = '{_escape_cypher(file_path)}' "
-                f"AND n.start_line > 0 "
-                f"RETURN n.id, n.name, n.file_path, n.start_line, n.end_line"
-            )
-            for row in rows or []:
-                node_id = row[0] or ""
-                name = row[1] or ""
-                start_line = row[3] or 0
-                end_line = row[4] or 0
-                label_prefix = node_id.split(":", 1)[0] if node_id else ""
-                for start, end in ranges:
-                    if start_line <= end and end_line >= start:
-                        affected_symbols.append(
-                            (name, label_prefix.title(), start_line, end_line)
-                        )
-                        break
-        except Exception as exc:
-            logger.warning("Failed to query symbols for %s: %s", file_path, exc, exc_info=True)
+        if not _SAFE_PATH.match(file_path):
+            logger.warning("Skipping unsafe file path in diff: %r", file_path)
             lines.append(f"  {file_path}:")
-            lines.append(f"    (error querying symbols: {exc})")
+            lines.append("    (skipped: path contains unsafe characters)")
             lines.append("")
             continue
+
+        rows = storage.execute_raw(
+            f"MATCH (n) WHERE n.file_path = '{_escape_cypher(file_path)}' "
+            f"AND n.start_line > 0 "
+            f"RETURN n.id, n.name, n.file_path, n.start_line, n.end_line"
+        ) or []
+        for row in rows:
+            node_id = row[0] or ""
+            name = row[1] or ""
+            start_line = row[3] or 0
+            end_line = row[4] or 0
+            label_prefix = node_id.split(":", 1)[0] if node_id else ""
+            for start, end in ranges:
+                if start_line <= end and end_line >= start:
+                    affected_symbols.append((name, label_prefix.title(), start_line, end_line))
+                    break
 
         lines.append(f"  {file_path}:")
         if affected_symbols:
@@ -527,20 +500,7 @@ def handle_cypher(storage: StorageBackend, query: str) -> str:
 def handle_coupling(
     storage: StorageBackend, file_path: str, min_strength: float = 0.3
 ) -> str:
-    """Query temporal coupling for a file and flag hidden dependencies.
-
-    Retrieves ``COUPLED_WITH`` edges for the given file, filters by minimum
-    strength, and cross-checks against ``IMPORTS`` edges to identify files
-    that are frequently co-changed but lack a static import relationship.
-
-    Args:
-        storage: The storage backend.
-        file_path: Path of the file to analyse.
-        min_strength: Minimum coupling strength threshold (default 0.3).
-
-    Returns:
-        Formatted coupling report with hidden-dependency warnings.
-    """
+    """Query temporal coupling for a file and flag hidden dependencies."""
     if not file_path or not file_path.strip():
         return "Error: 'file_path' parameter is required and cannot be empty."
 
@@ -562,8 +522,8 @@ def handle_coupling(
         return f"No temporal coupling found for '{file_path}' (min strength: {min_strength})."
 
     import_rows = storage.execute_raw(
-        f"MATCH (a:File)-[:IMPORTS]-(b:File) "
-        f"WHERE a.file_path = '{escaped}' "
+        f"MATCH (a:File)-[r:CodeRelation]->(b:File) "
+        f"WHERE a.file_path = '{escaped}' AND r.rel_type = 'imports' "
         f"RETURN b.file_path"
     ) or []
     imported_files = {r[0] for r in import_rows}
@@ -629,12 +589,7 @@ def handle_call_path(
         if depth >= max_depth:
             continue
 
-        try:
-            callees = storage.get_callees(current_id)
-        except Exception:
-            continue
-
-        for callee in callees:
+        for callee in storage.get_callees(current_id):
             if callee.id in visited:
                 continue
             visited.add(callee.id)
@@ -655,7 +610,6 @@ def handle_call_path(
             f"within {max_depth} hops."
         )
 
-    # Reconstruct path
     path_ids: list[str] = []
     node_id = tgt_node.id
     while node_id is not None:
@@ -663,7 +617,6 @@ def handle_call_path(
         node_id = parent.get(node_id)
     path_ids.reverse()
 
-    # Format output
     hop_count = len(path_ids) - 1
     path_names = []
     lines = []
@@ -718,7 +671,6 @@ def handle_communities(
 
         return "\n".join(lines)
 
-    # List mode
     rows = storage.execute_raw(
         "MATCH (c:Community) "
         "RETURN c.name, c.cohesion, c.properties_json "
@@ -741,7 +693,6 @@ def handle_communities(
         symbol_count = props.get("symbol_count", "?")
         lines.append(f"  {i}. {name}  (cohesion: {cohesion:.2f}, {symbol_count} symbols)")
 
-    # Cross-community processes
     cross_procs = storage.execute_raw(
         "MATCH (n)-[:STEP_IN_PROCESS]->(p:Process), (n)-[:MEMBER_OF]->(c:Community) "
         "WITH p.name AS proc, collect(DISTINCT c.name) AS comms "
@@ -779,7 +730,6 @@ def handle_explain(storage: StorageBackend, symbol: str) -> str:
     lines.append("=" * 48)
     lines.append("")
 
-    # Role
     roles = []
     if node.is_entry_point:
         roles.append("Entry point")
@@ -795,7 +745,6 @@ def handle_explain(storage: StorageBackend, symbol: str) -> str:
     if node.signature:
         lines.append(f"Signature: {node.signature}")
 
-    # Community
     escaped_id = _escape_cypher(node.id)
     comm_rows = storage.execute_raw(
         f"MATCH (n)-[:MEMBER_OF]->(c:Community) "
@@ -808,16 +757,8 @@ def handle_explain(storage: StorageBackend, symbol: str) -> str:
 
     lines.append("")
 
-    # Callers and callees summary
-    try:
-        callers = storage.get_callers_with_confidence(node.id)
-    except (AttributeError, TypeError):
-        callers = [(c, 1.0) for c in storage.get_callers(node.id)]
-
-    try:
-        callees = storage.get_callees_with_confidence(node.id)
-    except (AttributeError, TypeError):
-        callees = [(c, 1.0) for c in storage.get_callees(node.id)]
+    callers = storage.get_callers_with_confidence(node.id)
+    callees = storage.get_callees_with_confidence(node.id)
 
     if callers:
         caller_names = ", ".join(c.name for c, _ in callers[:5])
@@ -833,11 +774,10 @@ def handle_explain(storage: StorageBackend, symbol: str) -> str:
     else:
         lines.append("Calls: nothing (leaf)")
 
-    # Process flows
     proc_rows = storage.execute_raw(
         f"MATCH (n)-[:STEP_IN_PROCESS]->(p:Process) "
         f"WHERE n.id = '{escaped_id}' "
-        f"RETURN p.name, count(*)"
+        f"RETURN p.name"
     ) or []
     if proc_rows:
         lines.append("")
@@ -895,7 +835,6 @@ def handle_review_risk(storage: StorageBackend, diff: str) -> str:
             total_dependents += dep_count
             all_affected_symbols.append((name, label_prefix, file_path, dep_count))
 
-    # Missing co-change files
     missing_cochange: list[tuple[str, str, float]] = []
     for file_path in changed_files:
         if not _SAFE_PATH.match(file_path):
@@ -912,7 +851,6 @@ def handle_review_risk(storage: StorageBackend, diff: str) -> str:
             if coupled_file not in changed_file_set:
                 missing_cochange.append((coupled_file, file_path, strength))
 
-    # Community boundary crossings
     communities_touched: set[str] = set()
     for name, label, file_path, _ in all_affected_symbols:
         escaped = _escape_cypher(f"{label.lower()}:{file_path}:{name}")
@@ -924,11 +862,7 @@ def handle_review_risk(storage: StorageBackend, diff: str) -> str:
             if row[0]:
                 communities_touched.add(row[0])
 
-    # Risk score
-    score = 0
-    score += entry_points_hit
-    score += len(missing_cochange)
-    score += total_dependents // 10
+    score = entry_points_hit + len(missing_cochange) + total_dependents // 10
     if len(communities_touched) > 1:
         score += 2
     score = min(score, 10)
@@ -981,28 +915,24 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
 
     escaped = _escape_cypher(file_path)
 
-    # 1. Symbols defined in this file
     sym_rows = storage.execute_raw(
         f"MATCH (n) WHERE n.file_path = '{escaped}' AND n.start_line > 0 "
         f"RETURN n.name, label(n), n.start_line, n.is_dead, n.is_entry_point, n.is_exported "
         f"ORDER BY n.start_line"
     ) or []
 
-    # 2. Imports: files this file imports
     imports_out = storage.execute_raw(
         f"MATCH (a:File)-[r:CodeRelation]->(b:File) "
         f"WHERE a.file_path = '{escaped}' AND r.rel_type = 'imports' "
         f"RETURN b.file_path ORDER BY b.file_path"
     ) or []
 
-    # 3. Imported by: files that import this file
     imports_in = storage.execute_raw(
         f"MATCH (a:File)-[r:CodeRelation]->(b:File) "
         f"WHERE b.file_path = '{escaped}' AND r.rel_type = 'imports' "
         f"RETURN a.file_path ORDER BY a.file_path"
     ) or []
 
-    # 4. Temporal coupling (top 5)
     coupling_rows = storage.execute_raw(
         f"MATCH (a:File)-[r:COUPLED_WITH]-(b:File) "
         f"WHERE a.file_path = '{escaped}' "
@@ -1010,13 +940,11 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
         f"ORDER BY r.strength DESC LIMIT 5"
     ) or []
 
-    # 5. Dead code in this file
     dead_rows = storage.execute_raw(
         f"MATCH (n) WHERE n.is_dead = true AND n.file_path = '{escaped}' "
         f"RETURN n.name, n.start_line, label(n)"
     ) or []
 
-    # 6. Community membership
     comm_rows = storage.execute_raw(
         f"MATCH (n)-[r:CodeRelation]->(c:Community) "
         f"WHERE n.file_path = '{escaped}' AND r.rel_type = 'member_of' "
@@ -1029,7 +957,6 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
     lines = [f"File: {file_path}"]
     lines.append("=" * 48)
 
-    # Symbols section
     if sym_rows:
         lines.append("")
         lines.append(f"Symbols ({len(sym_rows)}):")
@@ -1050,7 +977,6 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
             tag_str = f"  [{', '.join(tags)}]" if tags else ""
             lines.append(f"  - {name} ({label}) line {start_line}{tag_str}")
 
-    # Imports section
     if imports_out:
         out_paths = [r[0] for r in imports_out if r[0]]
         lines.append("")
@@ -1060,7 +986,6 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
         in_paths = [r[0] for r in imports_in if r[0]]
         lines.append(f"Imported by ({len(in_paths)}): {', '.join(in_paths)}")
 
-    # Coupling section
     if coupling_rows:
         lines.append("")
         lines.append(f"Coupled files ({len(coupling_rows)}):")
@@ -1070,7 +995,6 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
             co_changes = row[2] or 0
             lines.append(f"  - {coupled_path}  strength: {strength:.2f}  co_changes: {co_changes}")
 
-    # Dead code section
     if dead_rows:
         lines.append("")
         lines.append(f"Dead code ({len(dead_rows)}):")
@@ -1080,7 +1004,6 @@ def handle_file_context(storage: StorageBackend, file_path: str) -> str:
             label = row[2] or "Unknown"
             lines.append(f"  - {name} ({label}) line {start_line}")
 
-    # Communities section
     if comm_rows:
         lines.append("")
         comm_parts = [f"{r[0]} ({r[1]} symbols)" for r in comm_rows if r[0]]
@@ -1114,7 +1037,6 @@ def handle_cycles(storage: StorageBackend, min_size: int = 2) -> str:
     if not cycles:
         return "No circular dependencies detected."
 
-    # Sort by size descending (largest cycles first)
     cycles.sort(key=len, reverse=True)
 
     lines = [f"Circular Dependencies ({len(cycles)} groups)"]
@@ -1144,8 +1066,7 @@ def handle_test_impact(
     symbols: list[str] | None = None,
 ) -> str:
     """Find tests likely affected by code changes."""
-    # Resolve changed symbols from diff or symbol list
-    changed_symbol_ids: list[tuple[str, str]] = []  # (node_id, name)
+    changed_symbol_ids: list[tuple[str, str]] = []
 
     if diff and diff.strip():
         changed_files = _parse_diff_files(diff)
@@ -1181,17 +1102,10 @@ def handle_test_impact(
     if not changed_symbol_ids:
         return "No changed symbols found."
 
-    # BFS callers for each changed symbol, collect test hits
-    # {test_file: [(test_name, source_sym, depth)]}
     test_hits: dict[str, list[tuple[str, str, int]]] = {}
 
     for sym_id, sym_name in changed_symbol_ids:
-        try:
-            callers_with_depth = storage.traverse_with_depth(sym_id, 4, direction="callers")
-        except Exception:
-            continue
-
-        for caller, depth in callers_with_depth:
+        for caller, depth in storage.traverse_with_depth(sym_id, 4, direction="callers"):
             if _is_test_file(caller.file_path):
                 test_hits.setdefault(caller.file_path, []).append(
                     (caller.name, sym_name, depth)
@@ -1203,13 +1117,11 @@ def handle_test_impact(
             f"changed symbol(s). Tests may not directly call these symbols."
         )
 
-    # Format output
     lines = ["Test Impact Analysis"]
     lines.append("=" * 48)
     lines.append(f"Changed symbols: {len(changed_symbol_ids)}")
     lines.append("")
 
-    # Split by confidence: direct (depth 1-2) vs transitive (depth 3+)
     direct_files: dict[str, list[tuple[str, str, int]]] = {}
     transitive_files: dict[str, list[tuple[str, str, int]]] = {}
 

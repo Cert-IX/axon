@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import json as _json
+import json
 import logging
 import math
 import tempfile
@@ -77,7 +77,7 @@ def _serialize_extra_props(props: dict[str, Any] | None) -> str:
     if not props:
         return ""
     extra = {k: v for k, v in props.items() if k not in _DEDICATED_PROPS}
-    return _json.dumps(extra) if extra else ""
+    return json.dumps(extra) if extra else ""
 
 
 def escape_cypher(value: str) -> str:
@@ -710,6 +710,36 @@ class KuzuBackend:
             logger.debug("get_indexed_files failed", exc_info=True)
         return mapping
 
+    def get_file_index(self) -> dict[str, str]:
+        """Return ``{file_path: node_id}`` for all File nodes."""
+        conn = self._require_conn()
+        index: dict[str, str] = {}
+        try:
+            with self._lock:
+                result = conn.execute("MATCH (n:File) RETURN n.file_path, n.id")
+            while result.has_next():
+                row = result.get_next()
+                index[row[0]] = row[1]
+        except Exception:
+            logger.debug("get_file_index failed", exc_info=True)
+        return index
+
+    def get_symbol_name_index(self) -> dict[str, list[str]]:
+        """Return ``{symbol_name: [node_id, ...]}`` for callable/type symbols."""
+        conn = self._require_conn()
+        index: dict[str, list[str]] = {}
+        tables = ["Function", "Method", "Class", "Interface", "TypeAlias"]
+        for table in tables:
+            try:
+                with self._lock:
+                    result = conn.execute(f"MATCH (n:{table}) RETURN n.name, n.id")
+                while result.has_next():
+                    row = result.get_next()
+                    index.setdefault(row[0], []).append(row[1])
+            except Exception:
+                logger.debug("get_symbol_name_index failed for %s", table, exc_info=True)
+        return index
+
     def load_graph(self) -> KnowledgeGraph:
         """Reconstruct a full :class:`KnowledgeGraph` from the database."""
         conn = self._require_conn()
@@ -927,7 +957,6 @@ class KuzuBackend:
             return True
         except Exception:
             logger.debug("CSV bulk_load_nodes failed, falling back", exc_info=True)
-            # Clear partially loaded tables to avoid duplicate-key errors on fallback.
             conn = self._require_conn()
             for table in by_table:
                 try:
@@ -1006,11 +1035,10 @@ class KuzuBackend:
         for table in _NODE_TABLE_NAMES:
             stmt = f"CREATE NODE TABLE IF NOT EXISTS {table}({_NODE_PROPERTIES})"
             conn.execute(stmt)
-            # Migration: add properties_json column for existing databases.
             try:
                 conn.execute(f"ALTER TABLE {table} ADD properties_json STRING DEFAULT ''")
             except Exception:
-                pass  # Column already exists.
+                pass
 
         conn.execute(
             f"CREATE NODE TABLE IF NOT EXISTS Embedding({_EMBEDDING_PROPERTIES})"
@@ -1192,7 +1220,7 @@ class KuzuBackend:
 
             if len(row) > 13 and row[13]:
                 try:
-                    extra = _json.loads(row[13])
+                    extra = json.loads(row[13])
                     if isinstance(extra, dict):
                         props.update(extra)
                 except (ValueError, TypeError):

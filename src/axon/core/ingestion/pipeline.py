@@ -36,10 +36,10 @@ from axon.core.ingestion.community import process_communities
 from axon.core.ingestion.coupling import resolve_coupling
 from axon.core.ingestion.dead_code import process_dead_code
 from axon.core.ingestion.heritage import process_heritage
-from axon.core.ingestion.imports import process_imports
+from axon.core.ingestion.imports import build_file_index, process_imports
 from axon.core.ingestion.parser_phase import process_parsing
 from axon.core.ingestion.processes import process_processes
-from axon.core.ingestion.resolved import NodePropertyPatch, ResolvedEdge
+from axon.core.ingestion.resolved import ResolvedEdge
 from axon.core.ingestion.structure import process_structure
 from axon.core.ingestion.symbol_lookup import build_name_index
 from axon.core.ingestion.types import process_types
@@ -145,17 +145,17 @@ def run_pipeline(
     process_imports(parse_data, graph, parallel=True)
     report("Resolving imports", 1.0)
 
-    _SHARED_LABELS = (
+    shared_labels = (
         NodeLabel.FUNCTION, NodeLabel.METHOD, NodeLabel.CLASS,
         NodeLabel.INTERFACE, NodeLabel.TYPE_ALIAS,
     )
-    shared_name_index = build_name_index(graph, _SHARED_LABELS)
-    _HERITAGE_LABELS = {NodeLabel.CLASS, NodeLabel.INTERFACE}
+    shared_name_index = build_name_index(graph, shared_labels)
+    heritage_labels = {NodeLabel.CLASS, NodeLabel.INTERFACE}
     heritage_name_index: dict[str, list[str]] = {}
     for name, ids in shared_name_index.items():
         filtered = [
             nid for nid in ids
-            if (n := graph.get_node(nid)) is not None and n.label in _HERITAGE_LABELS
+            if (n := graph.get_node(nid)) is not None and n.label in heritage_labels
         ]
         if filtered:
             heritage_name_index[name] = filtered
@@ -187,8 +187,6 @@ def run_pipeline(
     _write_collected_edges(types_f.result() or [], graph)
     report("Resolving relationships", 1.0)
 
-    # Snapshot file nodes before the executor — resolve_coupling must not
-    # read from the live graph while mutation phases run on the main thread.
     coupling_file_nodes = graph.get_nodes_by_label(NodeLabel.FILE)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -269,13 +267,8 @@ def reindex_files(
     Returns
     -------
     KnowledgeGraph
-        The partial in-memory graph containing only the reindexed files.
+        The hydrated in-memory graph used for incremental resolution.
     """
-    # Deliberately sequential — the watcher path handles 1-3 files and
-    # runs in <100ms.  Concurrency overhead isn't worth it here.
-
-    # DETACH DELETE drops inbound edges from unchanged files — save them
-    # before deletion and re-insert after rebuild.
     changed_files = {entry.path for entry in file_entries}
     saved_edges: list[GraphRelationship] = []
     for fp in changed_files:
@@ -286,17 +279,57 @@ def reindex_files(
     for entry in file_entries:
         storage.remove_nodes_by_file(entry.path)
 
-    graph = KnowledgeGraph()
+    graph = storage.load_graph()
 
     process_structure(file_entries, graph)
     parse_data = process_parsing(file_entries, graph)
-    process_imports(parse_data, graph)
-    process_calls(parse_data, graph)
-    process_heritage(parse_data, graph)
-    process_types(parse_data, graph)
 
-    storage.add_nodes(list(graph.iter_nodes()))
-    storage.add_relationships(list(graph.iter_relationships()))
+    file_index = build_file_index(graph)
+
+    shared_labels = (
+        NodeLabel.FUNCTION,
+        NodeLabel.METHOD,
+        NodeLabel.CLASS,
+        NodeLabel.INTERFACE,
+        NodeLabel.TYPE_ALIAS,
+    )
+    shared_name_index = build_name_index(graph, shared_labels)
+    heritage_labels = {NodeLabel.CLASS, NodeLabel.INTERFACE}
+    heritage_name_index: dict[str, list[str]] = {}
+    for name, ids in shared_name_index.items():
+        filtered = [
+            nid for nid in ids
+            if (n := graph.get_node(nid)) is not None and n.label in heritage_labels
+        ]
+        if filtered:
+            heritage_name_index[name] = filtered
+
+    process_imports(parse_data, graph, file_index=file_index)
+    process_calls(parse_data, graph, name_index=shared_name_index)
+    process_heritage(parse_data, graph, name_index=heritage_name_index)
+    process_types(parse_data, graph, name_index=shared_name_index)
+
+    incremental_nodes = [
+        node for node in graph.iter_nodes()
+        if (
+            node.file_path in changed_files
+            or (
+                node.label == NodeLabel.FOLDER
+                and any(
+                    file_path == node.file_path or file_path.startswith(f"{node.file_path}/")
+                    for file_path in changed_files
+                )
+            )
+        )
+    ]
+    incremental_node_ids = {node.id for node in incremental_nodes}
+    incremental_relationships = [
+        rel for rel in graph.iter_relationships()
+        if rel.source in incremental_node_ids or rel.target in incremental_node_ids
+    ]
+
+    storage.add_nodes(incremental_nodes)
+    storage.add_relationships(incremental_relationships)
 
     if saved_edges:
         storage.add_relationships(saved_edges)

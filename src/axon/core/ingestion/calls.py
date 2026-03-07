@@ -129,20 +129,16 @@ def resolve_call(
     if not candidate_ids:
         return None, 0.0
 
-    # 1. Same-file exact match.
     for nid in candidate_ids:
         node = graph.get_node(nid)
         if node is not None and node.file_path == file_path:
             return nid, 1.0
 
-    # 2. Import-resolved match.
     effective_cache = import_cache if import_cache is not None else _build_import_cache(file_path, graph)
     imported_target = _resolve_via_imports(name, candidate_ids, graph, effective_cache)
     if imported_target is not None:
         return imported_target, 1.0
 
-    # 3. Global fuzzy match -- only when there's a small number of candidates
-    # to avoid false positive edges for common names scattered across many files.
     if len(candidate_ids) > 5:
         return None, 0.0
     return _pick_closest(candidate_ids, graph, caller_file_path=file_path), 0.5
@@ -362,7 +358,6 @@ def resolve_file_calls(
             )
             continue
 
-        # Determine caller's class name for self/this resolution.
         caller_class_name: str | None = None
         if call.receiver in ("self", "this"):
             source_node = graph.get_node(source_id)
@@ -379,8 +374,6 @@ def resolve_file_calls(
             if edge is not None:
                 edges.append(edge)
 
-        # Callback arguments: bare identifiers passed as arguments
-        # (e.g. map(transform, items), Depends(get_db)).
         for arg_name in call.arguments:
             if arg_name in _CALL_BLOCKLIST:
                 continue
@@ -394,7 +387,6 @@ def resolve_file_calls(
                 if edge is not None:
                     edges.append(edge)
 
-        # Receiver: link to the class and resolve the method on it.
         receiver = call.receiver
         if receiver and receiver not in ("self", "this"):
             receiver_call = CallInfo(name=receiver, line=call.line)
@@ -415,9 +407,6 @@ def resolve_file_calls(
                 seen.add(recv_method_edge.rel_id)
                 edges.append(recv_method_edge)
 
-    # Decorators are implicit calls — @cost_decorator on a function is
-    # equivalent to calling cost_decorator(func).  Create CALLS edges
-    # from the decorated symbol to the decorator definition.
     for symbol in fpd.parse_result.symbols:
         if not symbol.decorators:
             continue

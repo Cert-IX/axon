@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from axon.core.graph.model import GraphNode, NodeLabel
+from axon.core.graph.graph import KnowledgeGraph
+from axon.core.graph.model import GraphNode, GraphRelationship, NodeLabel, RelType
 from axon.core.storage.base import SearchResult
+from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
     _confidence_tag,
     _format_query_results,
@@ -362,8 +364,6 @@ class TestHandleCypher:
 
 class TestResources:
     def test_get_schema(self):
-        from axon.mcp.resources import get_schema
-
         result = get_schema()
         assert "Node Labels:" in result
         assert "Relationship Types:" in result
@@ -371,15 +371,11 @@ class TestResources:
         assert "Function" in result
 
     def test_get_overview(self, mock_storage):
-        from axon.mcp.resources import get_overview
-
         mock_storage.execute_raw.return_value = [["Function", 42]]
         result = get_overview(mock_storage)
         assert "Axon Codebase Overview" in result
 
     def test_get_dead_code_list(self, mock_storage):
-        from axon.mcp.resources import get_dead_code_list
-
         mock_storage.execute_raw.return_value = [
             ["function:src/old.py:old_func", "old_func", "src/old.py", 10, "Function"],
         ]
@@ -388,8 +384,6 @@ class TestResources:
         assert "old_func" in result
 
     def test_get_dead_code_list_empty(self, mock_storage):
-        from axon.mcp.resources import get_dead_code_list
-
         result = get_dead_code_list(mock_storage)
         assert "No dead code detected" in result
 
@@ -969,9 +963,6 @@ class TestHandleTestImpact:
 class TestHandleCycles:
     def test_no_cycles(self, mock_storage):
         """Graph with no cycles returns clean message."""
-        from axon.core.graph.graph import KnowledgeGraph
-        from axon.core.graph.model import GraphRelationship, RelType
-
         kg = KnowledgeGraph()
         # Add 3 nodes with no cycles: A -> B -> C
         a = GraphNode(id="function:a.py:a", label=NodeLabel.FUNCTION, name="a",
@@ -995,9 +986,6 @@ class TestHandleCycles:
 
     def test_detects_cycle(self, mock_storage):
         """Graph with A -> B -> A cycle is detected."""
-        from axon.core.graph.graph import KnowledgeGraph
-        from axon.core.graph.model import GraphRelationship, RelType
-
         kg = KnowledgeGraph()
         a = GraphNode(id="function:a.py:a", label=NodeLabel.FUNCTION, name="a",
                       file_path="a.py", start_line=1, end_line=5)
@@ -1020,9 +1008,6 @@ class TestHandleCycles:
 
     def test_critical_large_cycle(self, mock_storage):
         """Cycles with 5+ symbols are marked CRITICAL."""
-        from axon.core.graph.graph import KnowledgeGraph
-        from axon.core.graph.model import GraphRelationship, RelType
-
         kg = KnowledgeGraph()
         nodes = []
         for i in range(5):
@@ -1047,7 +1032,6 @@ class TestHandleCycles:
         assert "Error loading graph" in result
 
     def test_empty_graph(self, mock_storage):
-        from axon.core.graph.graph import KnowledgeGraph
         kg = KnowledgeGraph()
         mock_storage.load_graph.return_value = kg
         result = handle_cycles(mock_storage)

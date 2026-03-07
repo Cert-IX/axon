@@ -133,6 +133,7 @@ def process_imports(
     *,
     parallel: bool = False,
     collect: bool = False,
+    file_index: dict[str, str] | None = None,
 ) -> list[ResolvedEdge] | None:
     """Resolve imports and create IMPORTS relationships in the graph.
 
@@ -145,8 +146,11 @@ def process_imports(
         graph: The knowledge graph to populate with IMPORTS relationships.
         parallel: When ``True``, resolve files in parallel using threads.
         collect: When ``True``, return flat list of edges instead of writing.
+        file_index: Optional pre-built ``{file_path: node_id}`` mapping.
+            When ``None``, built from the graph's File nodes.
     """
-    file_index = build_file_index(graph)
+    if file_index is None:
+        file_index = build_file_index(graph)
     source_roots = _detect_source_roots(file_index)
 
     if parallel:

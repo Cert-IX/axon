@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -283,8 +284,6 @@ class TestRunPipelineEmbeddings:
     def test_result_symbols_set_even_if_embed_fails(
         self, rich_repo: Path, rich_storage: KuzuBackend
     ) -> None:
-        from unittest.mock import patch
-
         with patch(
             "axon.core.ingestion.pipeline.embed_graph",
             side_effect=RuntimeError("model not found"),

@@ -18,10 +18,18 @@ import subprocess
 import time
 from pathlib import Path
 
+import watchfiles
+
 from axon.config.ignore import load_gitignore, should_ignore
 from axon.config.languages import is_supported
+from axon.core.embeddings.embedder import embed_nodes
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import NodeLabel, RelType
+from axon.core.ingestion.community import process_communities
+from axon.core.ingestion.coupling import process_coupling
+from axon.core.ingestion.dead_code import process_dead_code
+from axon.core.ingestion.pipeline import reindex_files
+from axon.core.ingestion.processes import process_processes
 from axon.core.ingestion.walker import FileEntry, read_file
 from axon.core.storage.base import StorageBackend
 
@@ -65,8 +73,6 @@ def _reindex_files(
 
     Returns (count_reindexed, set_of_relative_file_paths_reindexed).
     """
-    from axon.core.ingestion.pipeline import reindex_files
-
     entries: list[FileEntry] = []
     reindexed_paths: set[str] = set()
 
@@ -134,15 +140,10 @@ def _run_incremental_global_phases(
     detection runs (communities and processes are expensive and unlikely to
     shift from a 1-2 file change).
     """
-    from axon.core.ingestion.community import process_communities
-    from axon.core.ingestion.coupling import process_coupling
-    from axon.core.ingestion.dead_code import process_dead_code
-    from axon.core.ingestion.processes import process_processes
-    from axon.core.embeddings.embedder import embed_nodes
-
     small_change = len(dirty_files) < _SMALL_CHANGE_THRESHOLD
 
-    storage.delete_synthetic_nodes()
+    if not small_change:
+        storage.delete_synthetic_nodes()
 
     logger.info("Hydrating graph from storage...")
     graph = storage.load_graph()
@@ -214,8 +215,6 @@ async def watch_repo(
     period of QUIET_PERIOD seconds with no new changes. Coupling runs
     only when new git commits are detected.
     """
-    import watchfiles
-
     async def _run_sync(fn, *args):
         if lock is not None:
             async with lock:
