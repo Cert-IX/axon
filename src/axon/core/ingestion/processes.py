@@ -29,6 +29,12 @@ _PYTHON_DECORATOR_PATTERNS: tuple[str, ...] = (
     "@click.command",
 )
 
+# Go files where exported functions are true entry points.
+_GO_ENTRY_SUFFIXES: tuple[str, ...] = (
+    "main.go", "server.go", "handler.go", "handlers.go",
+    "routes.go", "router.go", "api.go", "cmd.go",
+)
+
 # TypeScript files where exports are true entry points (index/entry/app files).
 _TS_ENTRY_SUFFIXES: tuple[str, ...] = (
     "index.ts", "index.tsx", "index.js", "index.jsx",
@@ -98,6 +104,45 @@ def _matches_framework_pattern(node: GraphNode) -> bool:
         if name in ("handler", "middleware"):
             return True
         if node.is_exported and _is_ts_entry_file(node.file_path):
+            return True
+
+    # Go entry point detection
+    if language == "go" or node.file_path.endswith(".go"):
+        # main() and init() are always entry points
+        if name in ("main", "init"):
+            return True
+        # Test functions: TestXxx, BenchmarkXxx, ExampleXxx
+        if name.startswith(("Test", "Benchmark", "Example")):
+            return True
+        # HTTP handler patterns (exported functions in handler/route files)
+        if name[0:1].isupper() and any(
+            node.file_path.endswith(s) for s in _GO_ENTRY_SUFFIXES
+        ):
+            return True
+        # Functions with common handler signatures (fiber.Ctx, http.ResponseWriter, gin.Context)
+        if any(
+            sig_hint in content
+            for sig_hint in (
+                "http.ResponseWriter",
+                "*http.Request",
+                "fiber.Ctx",
+                "gin.Context",
+                "echo.Context",
+                "chi.Router",
+            )
+        ):
+            return True
+        # Kafka consumer patterns
+        if any(
+            pattern in content
+            for pattern in (
+                "kafka.Consumer",
+                "kafka.Reader",
+                "sarama.Consumer",
+                "ConsumerGroupHandler",
+                "confluent-kafka",
+            )
+        ):
             return True
 
     return False

@@ -28,6 +28,7 @@ def _is_test_file(file_path: str) -> bool:
         or "test" in parts
         or any(p.startswith("test_") for p in parts)
         or file_path.endswith("conftest.py")
+        or file_path.endswith("_test.go")  # Go test files
     )
 
 def _is_dunder(name: str) -> bool:
@@ -89,6 +90,22 @@ def _is_enum_class(node: GraphNode, label: NodeLabel) -> bool:
 def _is_python_public_api(name: str, file_path: str) -> bool:
     return file_path.endswith("__init__.py") and not name.startswith("_")
 
+def _is_go_exported(name: str, file_path: str) -> bool:
+    """In Go, exported symbols start with an uppercase letter — they are public API."""
+    if not file_path.endswith(".go"):
+        return False
+    return len(name) > 0 and name[0].isupper()
+
+def _is_go_special(name: str, file_path: str) -> bool:
+    """Go-specific exemptions: init(), main(), Test/Benchmark/Example funcs."""
+    if not file_path.endswith(".go"):
+        return False
+    if name in ("init", "main"):
+        return True
+    if name.startswith(("Test", "Benchmark", "Example")):
+        return True
+    return False
+
 def _is_exempt(
     name: str, is_entry_point: bool, is_exported: bool, file_path: str = ""
 ) -> bool:
@@ -101,6 +118,8 @@ def _is_exempt(
         or _is_test_file(file_path)
         or _is_dunder(name)
         or _is_python_public_api(name, file_path)
+        or _is_go_exported(name, file_path)
+        or _is_go_special(name, file_path)
     )
 
 def _clear_override_false_positives(graph: KnowledgeGraph) -> int:

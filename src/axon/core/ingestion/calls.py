@@ -82,6 +82,19 @@ _CALL_BLOCKLIST: frozenset[str] = frozenset({
     "useState", "useEffect", "useRef", "useCallback", "useMemo",
     "useContext", "useReducer", "useLayoutEffect", "useImperativeHandle",
     "useDebugValue", "useId", "useTransition", "useDeferredValue",
+    # Go builtins and common stdlib functions
+    "make", "new", "len", "cap", "append", "copy", "delete", "close",
+    "panic", "recover", "complex", "real", "imag", "print", "println",
+    "Println", "Printf", "Sprintf", "Fprintf", "Errorf", "Fatalf",
+    "Error", "String", "Format", "Unwrap",
+    # Go common method names that collide with user-defined symbols
+    "Lock", "Unlock", "RLock", "RUnlock", "Add", "Done", "Wait",
+    "Load", "Store", "Swap", "CompareAndSwap",
+    "Marshal", "Unmarshal", "Encode", "Decode",
+    "Read", "Write", "Close", "Flush", "Seek",
+    "Get", "Set", "Del", "Put", "Post", "Delete",
+    "WithValue", "WithCancel", "WithTimeout", "WithDeadline",
+    "Background", "TODO",
 })
 
 def resolve_call(

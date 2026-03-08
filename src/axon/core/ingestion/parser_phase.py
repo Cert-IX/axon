@@ -25,6 +25,7 @@ from axon.core.graph.model import (
 )
 from axon.core.ingestion.walker import FileEntry
 from axon.core.parsers.base import LanguageParser, ParseResult
+from axon.core.parsers.go_lang import GoParser
 from axon.core.parsers.python_lang import PythonParser
 from axon.core.parsers.typescript import TypeScriptParser
 
@@ -45,6 +46,7 @@ _PARSER_FACTORIES: dict[str, Callable[[], LanguageParser]] = {
     "typescript": lambda: TypeScriptParser(dialect="typescript"),
     "tsx": lambda: TypeScriptParser(dialect="tsx"),
     "javascript": lambda: TypeScriptParser(dialect="javascript"),
+    "go": GoParser,
 }
 
 @dataclass
@@ -85,7 +87,7 @@ def get_parser(language: str) -> LanguageParser:
         if factory is None:
             raise ValueError(
                 f"Unsupported language {language!r}. "
-                f"Expected one of: python, typescript, tsx, javascript"
+                f"Expected one of: python, typescript, tsx, javascript, go"
             )
 
         parser = factory()
