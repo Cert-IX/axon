@@ -4,9 +4,9 @@
 
 # Axon
 
-**Building the knowledge graph for AI code agents.**
+**The knowledge graph for your codebase — explore it visually, or let your AI agent query it.**
 
-Indexes any codebase into a structural knowledge graph — every dependency, call chain, cluster, and execution flow — then exposes it through smart MCP tools so AI agents never miss code, and through an interactive web UI so developers can explore visually.
+Indexes any codebase into a structural knowledge graph — every dependency, call chain, cluster, and execution flow. Explore it through an **interactive web dashboard** with force-directed graph visualization, or expose it through **MCP tools** so AI agents get full structural understanding in every tool call.
 
 ```
 $ axon analyze .
@@ -23,6 +23,20 @@ Generating embeddings...       623 vectors stored
 
 Done in 4.2s — 623 symbols, 1,847 edges, 8 clusters, 34 flows
 ```
+
+Then explore your codebase visually:
+
+```bash
+axon ui                      # Opens interactive dashboard at localhost:8420
+```
+
+**Three views, one command:**
+
+- **Explorer** — Interactive force-directed graph (Sigma.js + WebGL). Click any node to see its code, callers, callees, impact radius, and community. Community hull overlays show architectural clusters at a glance.
+- **Analysis** — Health score, coupling heatmap, dead code report, inheritance tree, branch diff — your codebase health in one dashboard.
+- **Cypher Console** — Write and run Cypher queries against the graph with syntax highlighting, presets, and history.
+
+Plus: command palette (`Cmd+K`), keyboard shortcuts, flow trace animations, graph minimap, and SSE-powered live reload when watch mode is active.
 
 ---
 
@@ -63,9 +77,10 @@ A 12-phase pipeline runs once over your repo. After that:
 ```bash
 pip install axoniq            # 1. Install
 cd your-project && axon analyze .  # 2. Index (one command, ~5s for most repos)
+axon ui                       # 3. Explore visually at localhost:8420
 ```
 
-Then add to `.mcp.json` in your project root:
+**For AI agents** — add to `.mcp.json` in your project root:
 
 ```json
 {
@@ -78,19 +93,40 @@ Then add to `.mcp.json` in your project root:
 }
 ```
 
-Your AI agent now has full structural understanding of your codebase. If you want an explicit shared host for multiple Claude sessions plus the UI, use `axon host --watch`.
-
-Or launch the web UI to explore the graph yourself:
+**For developers** — explore the graph yourself:
 
 ```bash
-axon ui                      # Opens the running host UI if present, otherwise starts standalone UI
+axon ui                      # Interactive dashboard (standalone or attaches to running host)
 axon ui --watch              # Live reload on file changes
-axon host --watch            # Optional explicit shared host: UI + multi-session MCP
+axon host --watch            # Shared host: UI + multi-session MCP
 ```
 
 ---
 
 ## What You Get
+
+### Explore your codebase visually
+
+**Web UI**
+
+A full interactive dashboard — no terminal or extensions required. One command:
+
+```bash
+axon ui                           # Launch at localhost:8420
+axon ui --watch                   # Live reload on file changes
+axon ui --port 9000               # Custom port
+axon ui --dev                     # Dev mode (Vite HMR on :5173)
+```
+
+| View | What It Shows |
+|------|--------------|
+| **Explorer** | Interactive force-directed graph (Sigma.js + WebGL), file tree sidebar, symbol detail panel with code preview, callers/callees, impact analysis, and process memberships. Community hull overlays reveal architectural clusters. |
+| **Analysis** | Health score, coupling heatmap, dead code report, inheritance tree visualization, branch diff, and aggregate stats — your codebase health at a glance. |
+| **Cypher Console** | Query editor with syntax highlighting, preset query library, results table, and query history. |
+
+**Extras:** Command palette (`Cmd+K`), keyboard shortcuts, graph minimap, flow trace and impact ripple animations, SSE-powered live reload when watch mode is enabled.
+
+The UI is backed by a FastAPI server with a full REST API — see [API Endpoints](#api-endpoints) below.
 
 ### Find anything — by name, concept, or typo
 
@@ -171,27 +207,6 @@ Watching /Users/you/project for changes...
 ```
 
 File-local phases (parse, imports, calls, types) run immediately on change. Global phases (communities, processes, dead code) batch every 30 seconds.
-
-### Explore visually
-
-**Web UI**
-
-A full interactive dashboard for exploring your knowledge graph — no terminal required.
-
-```bash
-axon ui                           # Launch at localhost:8420
-axon ui --watch                   # Live reload on file changes
-axon ui --port 9000               # Custom port
-axon ui --dev                     # Dev mode (Vite HMR on :5173)
-```
-
-**Three views:**
-
-- **Explorer** — Interactive graph canvas (Sigma.js + ForceAtlas2), file tree sidebar, symbol detail panel with code preview, callers/callees, impact analysis, and process memberships
-- **Analysis** — Health score, coupling heatmap, dead code report, inheritance tree, branch diff, and quick stats — all in one dashboard
-- **Cypher Console** — Write and run read-only Cypher queries against the graph with preset queries, syntax highlighting, and query history
-
-**Extras:** Command palette (`Cmd+K`), keyboard shortcuts, community hull overlays, graph minimap, flow trace and impact ripple animations, SSE-powered live reload when watch mode is enabled.
 
 ### Structural diff, not text diff
 
@@ -312,25 +327,7 @@ impact  -> "Tip: Review each affected symbol before making changes."
 
 ---
 
-## Web UI
-
-Axon ships with a built-in web dashboard for visual exploration — no extensions or plugins required.
-
-```bash
-cd your-project
-axon ui              # Launches standalone UI, or attaches to an existing host
-axon host            # Optional shared host for UI + multiple MCP clients
-```
-
-### Views
-
-| View | What It Shows |
-|------|--------------|
-| **Explorer** | Interactive force-directed graph (Sigma.js), file tree sidebar, symbol detail panel with code preview, callers/callees, impact analysis, and process memberships |
-| **Analysis** | Health score, coupling heatmap, dead code report, inheritance tree visualization, branch diff, and aggregate stats |
-| **Cypher** | Query editor with syntax highlighting, preset query library, results table, and query history |
-
-### API Endpoints
+## API Endpoints
 
 The web UI is backed by a FastAPI server. All endpoints are under `/api`:
 
@@ -359,6 +356,7 @@ Cypher queries are validated server-side — write keywords (`CREATE`, `DELETE`,
 
 | Capability | grep / ripgrep | LSP | Context window stuffing | Axon |
 |-----------|---------------|-----|------------------------|------|
+| **Interactive graph UI** | **No** | **No** | **No** | **Yes (full web dashboard)** |
 | Text search | Yes | No | Yes | Yes (hybrid BM25 + vector) |
 | Find all callers | No | Partial | Hit-or-miss | Yes (full call graph with confidence) |
 | Type relationships | No | Yes | No | Yes (param/return/variable roles) |
@@ -369,7 +367,6 @@ Cypher queries are validated server-side — write keywords (`CREATE`, `DELETE`,
 | Impact analysis | No | No | No | Yes (depth-grouped with confidence) |
 | AI agent integration | No | Partial | N/A | Yes (full MCP server) |
 | Structural branch diff | No | No | No | Yes (node/edge level) |
-| Interactive graph UI | No | No | No | Yes (web dashboard) |
 | Watch mode | No | Yes | No | Yes (Rust-based, 500ms debounce) |
 | Works offline | Yes | Yes | No | Yes |
 
