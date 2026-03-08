@@ -98,7 +98,7 @@ def create_app(
     app = FastAPI(
         title="Axon Web UI",
         description="Graph-powered code intelligence engine",
-        version="0.2.4",
+        version="1.0.0",
         lifespan=lifespan,
     )
 
