@@ -1,12 +1,12 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import type { MultiDirectedGraph } from 'graphology';
 import circular from 'graphology-layout/circular';
-import circlePack from 'graphology-layout/circlepack';
 import { useGraphStore } from '@/stores/graphStore';
 import { useGraph } from '@/hooks/useGraph';
 import { cn } from '@/lib/utils';
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner';
 import { EmptyState } from '@/components/shared/EmptyState';
+import type { Community } from '@/types';
 
 /* ------------------------------------------------------------------ */
 /*  Camera                                                             */
@@ -18,9 +18,16 @@ interface Camera {
   zoom: number;
 }
 
+interface Point {
+  x: number;
+  y: number;
+}
+
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 10;
 const ZOOM_SENSITIVITY = 0.001;
+const ACTIVE_MOTION_THRESHOLD = 0.18;
+const LAYOUT_SETTLE_FRAMES = 18;
 
 function screenToWorld(
   sx: number,
@@ -77,6 +84,12 @@ interface VisualEdge {
   targetRadius: number;
   /** Radius of the source node */
   sourceRadius: number;
+}
+
+interface CommunityGroup {
+  id: string;
+  members: string[];
+  radius: number;
 }
 
 function buildNeighborSet(graph: MultiDirectedGraph, nodeId: string | null): Set<string> | null {
@@ -258,8 +271,11 @@ function computeVisualEdges(
     }
 
     if (state.highlightedNodeIds.size > 0) {
-      if (state.highlightedNodeIds.has(source) && state.highlightedNodeIds.has(target)) {
-        edge.size = 1.0;
+      const sourceHighlighted = state.highlightedNodeIds.has(source);
+      const targetHighlighted = state.highlightedNodeIds.has(target);
+      if (sourceHighlighted || targetHighlighted) {
+        edge.size = sourceHighlighted && targetHighlighted ? 5.0 : 3.4;
+        edge.color = brightenEdgeColor(edge.color);
       } else {
         edge.hidden = true;
       }
@@ -671,6 +687,187 @@ function computeRadialLayout(graph: MultiDirectedGraph, centerNodeId?: string | 
   return positions;
 }
 
+function estimateClusterRadius(graph: MultiDirectedGraph, members: string[]): number {
+  if (members.length === 0) return 160;
+
+  let totalArea = 0;
+  let maxSize = 0;
+  for (const memberId of members) {
+    const size = finiteOr(graph.getNodeAttribute(memberId, 'size'), 50);
+    maxSize = Math.max(maxSize, size);
+    totalArea += Math.PI * Math.pow(size * 2.15, 2);
+  }
+
+  return Math.max(150, Math.sqrt(totalArea / Math.PI) + maxSize * 1.8);
+}
+
+function placeClusterCenters(groups: CommunityGroup[]): Map<string, Point> {
+  const centers = new Map<string, Point>();
+  const placed: { id: string; x: number; y: number; radius: number }[] = [];
+
+  if (groups.length === 0) return centers;
+
+  centers.set(groups[0].id, { x: 0, y: 0 });
+  placed.push({ id: groups[0].id, x: 0, y: 0, radius: groups[0].radius });
+
+  const GOLDEN_ANGLE = 2.399963229728653;
+  for (let i = 1; i < groups.length; i++) {
+    const group = groups[i];
+    let step = i;
+    let candidateX = 0;
+    let candidateY = 0;
+
+    while (true) {
+      const spiralRadius = 140 + 36 * step + group.radius;
+      const angle = step * GOLDEN_ANGLE;
+      candidateX = Math.cos(angle) * spiralRadius;
+      candidateY = Math.sin(angle) * spiralRadius;
+
+      const overlaps = placed.some((existing) => {
+        const dx = candidateX - existing.x;
+        const dy = candidateY - existing.y;
+        const minDistance = group.radius + existing.radius + 140;
+        return dx * dx + dy * dy < minDistance * minDistance;
+      });
+
+      if (!overlaps) break;
+      step += 1;
+    }
+
+    centers.set(group.id, { x: candidateX, y: candidateY });
+    placed.push({ id: group.id, x: candidateX, y: candidateY, radius: group.radius });
+  }
+
+  return centers;
+}
+
+function computeClusterMemberLayout(
+  graph: MultiDirectedGraph,
+  center: Point,
+  members: string[],
+): PositionMap {
+  const positions: PositionMap = new Map();
+  if (members.length === 0) return positions;
+  if (members.length === 1) {
+    positions.set(members[0], center);
+    return positions;
+  }
+
+  const memberSet = new Set(members);
+  const sortedMembers = [...members].sort((a, b) => {
+    let aInternalDegree = 0;
+    graph.forEachNeighbor(a, (neighbor) => {
+      if (memberSet.has(neighbor)) aInternalDegree += 1;
+    });
+    let bInternalDegree = 0;
+    graph.forEachNeighbor(b, (neighbor) => {
+      if (memberSet.has(neighbor)) bInternalDegree += 1;
+    });
+
+    return (
+      bInternalDegree - aInternalDegree ||
+      graph.degree(b) - graph.degree(a) ||
+      a.localeCompare(b)
+    );
+  });
+
+  positions.set(sortedMembers[0], center);
+  if (sortedMembers.length === 2) {
+    const offset = Math.max(
+      finiteOr(graph.getNodeAttribute(sortedMembers[0], 'size'), 50),
+      finiteOr(graph.getNodeAttribute(sortedMembers[1], 'size'), 50),
+    ) * 2.8;
+    positions.set(sortedMembers[1], { x: center.x + offset, y: center.y });
+    return positions;
+  }
+
+  let index = 1;
+  let ring = 1;
+  while (index < sortedMembers.length) {
+    const remaining = sortedMembers.length - index;
+    const baseSpacing = 125 + ring * 18;
+    const radius = ring * baseSpacing;
+    const capacity = Math.max(6, Math.ceil((2 * Math.PI * radius) / 120));
+    const count = Math.min(capacity, remaining);
+    const angleStep = (2 * Math.PI) / count;
+    const ringOffset = (ring % 2) * (angleStep / 2);
+
+    for (let i = 0; i < count; i++) {
+      const memberId = sortedMembers[index + i];
+      const size = finiteOr(graph.getNodeAttribute(memberId, 'size'), 50);
+      const angle = ringOffset + i * angleStep;
+      const localRadius = radius + size * 0.35;
+      positions.set(memberId, {
+        x: center.x + Math.cos(angle) * localRadius,
+        y: center.y + Math.sin(angle) * localRadius,
+      });
+    }
+
+    index += count;
+    ring += 1;
+  }
+
+  return positions;
+}
+
+function computeCommunityLayout(
+  graph: MultiDirectedGraph,
+  communities: Community[],
+): PositionMap {
+  const positions: PositionMap = new Map();
+  const memberToCommunity = new Map<string, string>();
+  const groups = new Map<string, string[]>();
+  const communityNameById = new Map<string, string>();
+
+  for (const community of communities) {
+    communityNameById.set(community.id, community.name);
+    groups.set(community.id, []);
+    for (const memberId of community.members) {
+      memberToCommunity.set(memberId, community.id);
+    }
+  }
+
+  graph.forEachNode((id, attrs) => {
+    const fallbackGroup =
+      memberToCommunity.get(id) ??
+      (attrs.directory as string) ??
+      (attrs.nodeType as string) ??
+      'ungrouped';
+    const members = groups.get(fallbackGroup) ?? [];
+    members.push(id);
+    groups.set(fallbackGroup, members);
+  });
+
+  const orderedGroups: CommunityGroup[] = [...groups.entries()]
+    .filter(([, members]) => members.length > 0)
+    .map(([groupId, members]) => ({
+      id: groupId,
+      members: [...members].sort(),
+      radius: estimateClusterRadius(graph, members),
+    }))
+    .sort((a, b) => {
+      const aName = communityNameById.get(a.id) ?? a.id;
+      const bName = communityNameById.get(b.id) ?? b.id;
+      return b.members.length - a.members.length || aName.localeCompare(bName);
+    });
+
+  if (orderedGroups.length === 0) {
+    return computeRadialLayout(graph);
+  }
+
+  const clusterCenters = placeClusterCenters(orderedGroups);
+  for (const group of orderedGroups) {
+    const center = clusterCenters.get(group.id);
+    if (!center) continue;
+    const memberPositions = computeClusterMemberLayout(graph, center, group.members);
+    for (const [memberId, point] of memberPositions) {
+      positions.set(memberId, point);
+    }
+  }
+
+  return positions;
+}
+
 function animatePositions(
   graph: MultiDirectedGraph,
   targets: PositionMap,
@@ -750,20 +947,26 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
   const renderFrameRef = useRef<number>(0);
   const layoutAnimRef = useRef<number>(0);
   const nodesCache = useRef<VisualNode[]>([]);
+  const edgesCache = useRef<VisualEdge[]>([]);
   const needsRender = useRef(true);
   const spawnAnimatingRef = useRef(false);
   const layoutAnimatingRef = useRef(false);
+  const layoutActiveRef = useRef(true);
+  const settleFramesRef = useRef(LAYOUT_SETTLE_FRAMES);
+  const visualStateDirtyRef = useRef(true);
+  const positionDirtyRef = useRef(true);
+  const dimAnimatingRef = useRef(false);
   // Velocity arrays for friction-based physics (persistent across frames)
   const velocitiesRef = useRef<{ vx: Map<string, number>; vy: Map<string, number> }>({
     vx: new Map(), vy: new Map(),
   });
   // Per-node dim amount (0=normal, 1=fully dimmed) — lerped each frame for smooth transition
   const dimRef = useRef<Map<string, number>>(new Map());
+  const [layoutActive, setLayoutActive] = useState(true);
 
   const { graphRef, loading, error } = useGraph();
 
   const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
-  const hoveredNodeId = useGraphStore((s) => s.hoveredNodeId);
   const highlightedNodeIds = useGraphStore((s) => s.highlightedNodeIds);
   const visibleNodeTypes = useGraphStore((s) => s.visibleNodeTypes);
   const visibleEdgeTypes = useGraphStore((s) => s.visibleEdgeTypes);
@@ -771,10 +974,24 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
   const setHoveredNode = useGraphStore((s) => s.setHoveredNode);
   const layoutMode = useGraphStore((s) => s.layoutMode);
 
+  const setLayoutActivity = useCallback((next: boolean) => {
+    if (layoutActiveRef.current !== next) {
+      layoutActiveRef.current = next;
+      setLayoutActive(next);
+    }
+  }, []);
+
+  const markLayoutUnsettled = useCallback((frames = LAYOUT_SETTLE_FRAMES) => {
+    settleFramesRef.current = frames;
+    setLayoutActivity(true);
+    needsRender.current = true;
+  }, [setLayoutActivity]);
+
   // Mark for re-render when store state changes
   useEffect(() => {
     needsRender.current = true;
-  }, [selectedNodeId, hoveredNodeId, highlightedNodeIds, visibleNodeTypes, visibleEdgeTypes]);
+    visualStateDirtyRef.current = true;
+  }, [selectedNodeId, highlightedNodeIds, visibleNodeTypes, visibleEdgeTypes]);
 
   /* ---------- render loop ---------- */
 
@@ -793,9 +1010,9 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
     }
 
     const isAnimating =
-      physicsRunning.current ||
       spawnAnimatingRef.current ||
-      layoutAnimatingRef.current;
+      layoutAnimatingRef.current ||
+      layoutActiveRef.current;
     if (!isAnimating && !needsRender.current) {
       renderFrameRef.current = requestAnimationFrame(render);
       return;
@@ -822,7 +1039,10 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
     //   • Low max velocity cap → no explosions, smooth motion.
     //
     const g = graphRef.current;
-    if (g && physicsRunning.current) {
+    let motionMetric = 0;
+    let collisionAdjusted = false;
+    if (g && physicsRunning.current && layoutActiveRef.current) {
+      positionDirtyRef.current = true;
       const vels = velocitiesRef.current;
       const ids: string[] = [];
       const xs: number[] = [];
@@ -917,6 +1137,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
       // Apply forces → velocity → position, with heavy friction
       const FRICTION = 0.08; // velocity retained = 1 - FRICTION = 0.92
       const MAX_VELOCITY = 6;
+      let totalSpeed = 0;
       for (let i = 0; i < n; i++) {
         if (isFixed[i]) {
           vels.vx.set(ids[i], 0);
@@ -937,6 +1158,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         }
         vels.vx.set(ids[i], nvx);
         vels.vy.set(ids[i], nvy);
+        totalSpeed += Math.sqrt(nvx * nvx + nvy * nvy);
         xs[i] += nvx;
         ys[i] += nvy;
       }
@@ -973,14 +1195,17 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
               ys[j] += uy * correction;
               corrected.add(i);
               corrected.add(j);
+              collisionAdjusted = true;
             } else if (!isFixed[i]) {
               xs[i] -= ux * correction * 2;
               ys[i] -= uy * correction * 2;
               corrected.add(i);
+              collisionAdjusted = true;
             } else if (!isFixed[j]) {
               xs[j] += ux * correction * 2;
               ys[j] += uy * correction * 2;
               corrected.add(j);
+              collisionAdjusted = true;
             }
           }
         }
@@ -997,51 +1222,85 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
           }
         }
       }
+
+      motionMetric = n > 0 ? totalSpeed / n : 0;
+    }
+
+    if (spawnAnimatingRef.current || layoutAnimatingRef.current) {
+      settleFramesRef.current = LAYOUT_SETTLE_FRAMES;
+      setLayoutActivity(true);
+    } else if (physicsRunning.current) {
+      if (collisionAdjusted || motionMetric > ACTIVE_MOTION_THRESHOLD) {
+        settleFramesRef.current = LAYOUT_SETTLE_FRAMES;
+        setLayoutActivity(true);
+      } else if (settleFramesRef.current > 0) {
+        settleFramesRef.current -= 1;
+        setLayoutActivity(true);
+      } else {
+        setLayoutActivity(false);
+      }
+    } else {
+      settleFramesRef.current = 0;
+      setLayoutActivity(false);
     }
 
     const cam = cameraRef.current;
     const state = useGraphStore.getState();
-    const selectedNeighbors = buildNeighborSet(graph, state.selectedNodeId);
-    const hoveredNeighbors = buildNeighborSet(graph, state.hoveredNodeId);
+    const shouldRecomputeVisuals =
+      visualStateDirtyRef.current ||
+      positionDirtyRef.current ||
+      dimAnimatingRef.current;
 
-    // Compute visual data
-    const visualNodes = computeVisualNodes(graph, {
-      selectedNodeId: state.selectedNodeId,
-      hoveredNodeId: state.hoveredNodeId,
-      selectedNeighbors,
-      hoveredNeighbors,
-      highlightedNodeIds: state.highlightedNodeIds,
-      visibleNodeTypes: state.visibleNodeTypes,
-    });
-    const visualEdges = computeVisualEdges(graph, {
-      selectedNodeId: state.selectedNodeId,
-      hoveredNodeId: state.hoveredNodeId,
-      highlightedNodeIds: state.highlightedNodeIds,
-      visibleEdgeTypes: state.visibleEdgeTypes,
-      visibleNodeTypes: state.visibleNodeTypes,
-    });
-    // Lerp per-node dim values for smooth 150ms transition
-    // dim target comes from computeVisualNodes, current value lerps toward it
-    const dimMap = dimRef.current;
-    const DIM_SPEED = 0.05; // lerp factor per frame (~400ms at 60fps)
-    let dimAnimating = false;
-    for (const node of visualNodes) {
-      const current = dimMap.get(node.id) ?? 0;
-      const target = node.dim;
-      if (Math.abs(target - current) > 0.005) dimAnimating = true;
-      const next = current + (target - current) * DIM_SPEED;
-      // Snap when very close to avoid perpetual tiny updates
-      const snapped = Math.abs(next - target) < 0.005 ? target : next;
-      dimMap.set(node.id, snapped);
-      node.dim = snapped;
-      // Apply dim to colors
-      if (snapped > 0.01) {
-        node.color = dimColor(node.color, snapped);
-        node.borderColor = dimColor(node.borderColor, snapped);
-        if (snapped > 0.5) node.label = ''; // hide label when mostly dimmed
+    let visualNodes = nodesCache.current;
+    let visualEdges = edgesCache.current;
+    let dimAnimating = dimAnimatingRef.current;
+
+    if (shouldRecomputeVisuals) {
+      const selectedNeighbors = buildNeighborSet(graph, state.selectedNodeId);
+      const hoveredNeighbors = buildNeighborSet(graph, state.hoveredNodeId);
+
+      visualNodes = computeVisualNodes(graph, {
+        selectedNodeId: state.selectedNodeId,
+        hoveredNodeId: state.hoveredNodeId,
+        selectedNeighbors,
+        hoveredNeighbors,
+        highlightedNodeIds: state.highlightedNodeIds,
+        visibleNodeTypes: state.visibleNodeTypes,
+      });
+      visualEdges = computeVisualEdges(graph, {
+        selectedNodeId: state.selectedNodeId,
+        hoveredNodeId: state.hoveredNodeId,
+        highlightedNodeIds: state.highlightedNodeIds,
+        visibleEdgeTypes: state.visibleEdgeTypes,
+        visibleNodeTypes: state.visibleNodeTypes,
+      });
+
+      const dimMap = dimRef.current;
+      const DIM_SPEED = 0.05;
+      dimAnimating = false;
+      for (const node of visualNodes) {
+        const current = dimMap.get(node.id) ?? 0;
+        const target = node.dim;
+        if (Math.abs(target - current) > 0.005) dimAnimating = true;
+        const next = current + (target - current) * DIM_SPEED;
+        const snapped = Math.abs(next - target) < 0.005 ? target : next;
+        dimMap.set(node.id, snapped);
+        node.dim = snapped;
+        if (snapped > 0.01) {
+          node.color = dimColor(node.color, snapped);
+          node.borderColor = dimColor(node.borderColor, snapped);
+          if (snapped > 0.5) node.label = '';
+        }
       }
+
+      nodesCache.current = visualNodes;
+      edgesCache.current = visualEdges;
+      visualStateDirtyRef.current = false;
+      if (!layoutActiveRef.current && !spawnAnimatingRef.current && !layoutAnimatingRef.current) {
+        positionDirtyRef.current = false;
+      }
+      dimAnimatingRef.current = dimAnimating;
     }
-    nodesCache.current = visualNodes;
 
     // Clear
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1163,6 +1422,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
           graph.setNodeAttribute(id, '_spawnAlpha', Math.min(1, t * 2)); // fade in fast
         }
       });
+      positionDirtyRef.current = true;
       needsRender.current = true;
 
       if (elapsed < totalSpawnTime) {
@@ -1175,6 +1435,8 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
     }
 
     spawnAnimatingRef.current = true;
+    markLayoutUnsettled(24);
+    positionDirtyRef.current = true;
     layoutAnimRef.current = requestAnimationFrame(spawnTick);
 
     // Fit camera to target bounds immediately so we see the whole animation
@@ -1247,6 +1509,9 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
 
       if (draggedNode) {
         didDrag = true;
+        markLayoutUnsettled();
+        visualStateDirtyRef.current = true;
+        positionDirtyRef.current = true;
         const world = canvasToWorld(sx, sy);
         const prevX = graph.getNodeAttribute(draggedNode, 'x') as number;
         const prevY = graph.getNodeAttribute(draggedNode, 'y') as number;
@@ -1296,6 +1561,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         const current = useGraphStore.getState().hoveredNodeId;
         if (hit !== current) {
           setHoveredNode(hit);
+          visualStateDirtyRef.current = true;
           canvas!.style.cursor = hit ? 'grab' : 'default';
           needsRender.current = true;
         }
@@ -1361,6 +1627,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
       }
       isPanning = false;
       setHoveredNode(null);
+      visualStateDirtyRef.current = true;
       canvas!.style.cursor = 'default';
     }
 
@@ -1381,7 +1648,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('mouseleave', onMouseLeave);
     };
-  }, [loading, render, selectNode, setHoveredNode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loading, markLayoutUnsettled, render, selectNode, setHoveredNode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------- layout mode changes ---------- */
 
@@ -1391,10 +1658,14 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
 
     cancelAnimationFrame(layoutAnimRef.current);
     needsRender.current = true;
+    markLayoutUnsettled();
+    visualStateDirtyRef.current = true;
+    positionDirtyRef.current = true;
 
     if (layoutMode === 'force') {
       physicsRunning.current = true;
       layoutAnimatingRef.current = false;
+      settleFramesRef.current = LAYOUT_SETTLE_FRAMES;
     } else {
       physicsRunning.current = false;
 
@@ -1406,22 +1677,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         targets = computeRadialLayout(graph, selectedNodeId);
       } else if (layoutMode === 'community') {
         const communities = useGraphStore.getState().communities;
-        const memberToCommunity = new Map<string, string>();
-        for (const c of communities) {
-          for (const memberId of c.members) memberToCommunity.set(memberId, c.id);
-        }
-        graph.forEachNode((id, attrs) => {
-          const communityId = memberToCommunity.get(id) ?? (attrs.directory as string) ?? 'unknown';
-          graph.setNodeAttribute(id, 'community', communityId);
-        });
-        circlePack.assign(graph, { hierarchyAttributes: ['community'], scale: 1000 });
-        targets = new Map();
-        graph.forEachNode((id, attrs) => {
-          targets.set(id, {
-            x: finiteOr(attrs.x, 0),
-            y: finiteOr(attrs.y, 0),
-          });
-        });
+        targets = computeCommunityLayout(graph, communities);
       } else {
         const nodeCount = graph.order;
         const circularScale = Math.max(500, nodeCount * 2);
@@ -1443,6 +1699,9 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         layoutAnimRef,
         () => {
           layoutAnimatingRef.current = false;
+          settleFramesRef.current = 0;
+          setLayoutActivity(false);
+          positionDirtyRef.current = true;
           if (canvasRef.current) {
             fitCameraToGraph(graph, canvasRef.current, cameraRef);
           }
@@ -1453,7 +1712,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         },
       );
     }
-  }, [layoutMode, selectedNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [layoutMode, markLayoutUnsettled, selectedNodeId, setLayoutActivity]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------- controls ---------- */
 
@@ -1471,13 +1730,20 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
     const graph = graphRef.current;
     const canvas = canvasRef.current;
     if (graph && canvas) fitCameraToGraph(graph, canvas, cameraRef);
+    markLayoutUnsettled(8);
     needsRender.current = true;
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [markLayoutUnsettled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleLayout = useCallback(() => {
     physicsRunning.current = !physicsRunning.current;
+    if (physicsRunning.current) {
+      markLayoutUnsettled();
+    } else {
+      settleFramesRef.current = 0;
+      setLayoutActivity(false);
+    }
     needsRender.current = true;
-  }, []);
+  }, [markLayoutUnsettled, setLayoutActivity]);
 
   /* ---------- early returns ---------- */
 
@@ -1517,7 +1783,7 @@ export function GraphCanvas({ className }: GraphCanvasProps) {
         onToggleLayout={toggleLayout}
         layoutRunning={physicsRunning.current}
       />
-      {physicsRunning.current && <LayoutIndicator />}
+      {layoutActive && <LayoutIndicator />}
     </div>
   );
 }
