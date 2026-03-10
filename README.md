@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./axon-logo.png" alt="Axon logo" width="420" />
+  <img src="https://raw.githubusercontent.com/harshkedia177/axon/main/axon-logo.png" alt="Axon logo" width="420" />
 </p>
 
 # Axon
