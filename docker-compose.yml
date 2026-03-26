@@ -1,0 +1,50 @@
+# Axon MCP Server — Code Intelligence Knowledge Graph
+# Exposes MCP tools + Web UI for AI agents (Claude, Windsurf, Cursor)
+# Indexes Go services into a queryable knowledge graph
+#
+# Domain: https://axon.cert-ix.com (SSL + basic auth via system nginx)
+# MCP:    https://axon.cert-ix.com/mcp (no auth, rate-limited)
+# Local:  http://127.0.0.1:8420 (direct, no auth)
+#
+# Nginx config: /etc/nginx/sites-available/axon.cert-ix.com.conf
+# Htpasswd:     /etc/nginx/.htpasswd_axon
+#
+# Usage:
+#   docker-compose up -d          # Start
+#   docker-compose logs -f        # View logs
+#   docker-compose restart        # Restart (re-reads existing index)
+#   docker-compose down           # Stop
+#
+# Re-index after code changes:
+#   rm -rf /apps/mvp_v1/go-services/.axon && docker-compose restart
+
+networks:
+  cert-ix-network:
+    external: true
+
+services:
+  axon-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cert-ix/axon-mcp:latest
+    container_name: cert-ix-axon-mcp
+    ports:
+      - "127.0.0.1:8420:8420"
+    environment:
+      - AXON_REPO_DIR=/repo
+      - AXON_PORT=8420
+      - AXON_BIND=0.0.0.0
+      - AXON_WATCH=false
+      - AXON_NO_EMBEDDINGS=true
+    volumes:
+      - /apps/mvp_v1/go-services:/repo
+    networks:
+      - cert-ix-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8420/api/host"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
